@@ -62,10 +62,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="OpenPDF Studio Backend", lifespan=lifespan)
 
-# Allow typical localhost frontend ports
+# Configure CORS
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=allowed_origins,
+    allow_origin_regex="https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
