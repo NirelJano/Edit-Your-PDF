@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+pydantic-settings
+python-dotenv
+pymupdf
+pytesseract
+opencv-python-headless
+pillow
+pdf2docx
+supabase
+uuid
+asyncio
