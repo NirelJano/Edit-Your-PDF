@@ -498,6 +498,51 @@ async def fetch_downloads(user = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+class BulkDeleteRequest(BaseModel):
+    ids: List[str]
+
+@app.post("/api/downloads/bulk-delete")
+async def bulk_delete_downloads(req: BulkDeleteRequest, user = Depends(get_current_user)):
+    try:
+        # Fetch records to verify ownership and get storage paths
+        res = supabase.table("downloads").select("id, user_id, storage_path, preview_path").in_("id", req.ids).execute()
+        valid_ids = []
+        paths_to_delete = []
+        
+        for record in res.data:
+            if record.get("user_id") == user.id:
+                valid_ids.append(record["id"])
+                if record.get("storage_path"):
+                    paths_to_delete.append(record["storage_path"])
+                if record.get("preview_path"):
+                    paths_to_delete.append(record["preview_path"])
+        
+        if not valid_ids:
+            return {"deleted_count": 0, "message": "No valid records found for deletion"}
+            
+        # 1. Delete from storage
+        from services.supabase_service import supabase as sb_client
+        if paths_to_delete:
+            try:
+                sb_client.storage.from_("pdf-storage").remove(paths_to_delete)
+            except Exception as e:
+                print(f"[Backend] Storage cleanup failed during bulk delete: {e}")
+                
+        # 2. Delete from DB
+        supabase.table("downloads").delete().in_("id", valid_ids).execute()
+        
+        # 3. Clear RAM cache
+        ids_set = set(valid_ids)
+        keys_to_remove = [k for k in THUMBNAIL_RAM_CACHE.keys() if any(vid in k[0] for vid in ids_set)]
+        for k in keys_to_remove:
+            del THUMBNAIL_RAM_CACHE[k]
+            
+        print(f"[Backend] Bulk deleted {len(valid_ids)} history items for user {user.id}")
+        return {"deleted_count": len(valid_ids)}
+    except Exception as e:
+        print(f"[Backend] ERROR in bulk delete: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/downloads/url/{download_id}")
 async def get_download_url(download_id: str, user = Depends(get_current_user)):
     try:

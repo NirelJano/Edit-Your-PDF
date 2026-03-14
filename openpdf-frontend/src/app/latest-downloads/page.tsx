@@ -178,40 +178,87 @@ export default function LatestDownloads() {
     const [searchQuery, setSearchQuery] = useState('');
     const [dateFilter, setDateFilter] = useState<number | null>(null); // days back
     const [page, setPage] = useState(1);
-    const itemsPerPage = 10;
+
+
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+    const [itemsPerPage, setItemsPerPage] = useState(10);
+    const [isDeleting, setIsDeleting] = useState(false);
 
     const [previewState, setPreviewState] = useState<PreviewState | null>(null);
 
     const router = useRouter();
     const supabase = createClient();
 
-    useEffect(() => {
-        const fetchDownloads = async () => {
-            try {
-                const { data: { session } } = await supabase.auth.getSession();
-                if (!session) {
-                    router.push('/login');
-                    return;
-                }
-
-                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/downloads`, {
-                    headers: {
-                        'Authorization': `Bearer ${session.access_token}`
-                    }
-                });
-
-                if (!res.ok) throw new Error('Failed to fetch downloads');
-                const data = await res.json();
-                setDownloads(data);
-            } catch (err: any) {
-                setError(err.message);
-            } finally {
-                setLoading(false);
+    const fetchDownloads = async () => {
+        try {
+            setLoading(true);
+            const { data: { session } } = await supabase.auth.getSession();
+            if (!session) {
+                router.push('/login');
+                return;
             }
-        };
 
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/downloads`, {
+                headers: { 'Authorization': `Bearer ${session.access_token}` }
+            });
+
+            if (!res.ok) throw new Error('Failed to fetch downloads');
+            const data = await res.json();
+            setDownloads(data);
+        } catch (err: any) {
+            setError(err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
         fetchDownloads();
     }, [router, supabase.auth]);
+
+    const handleBulkDelete = async () => {
+        if (selectedIds.size === 0) return;
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק ${selectedIds.size} קבצים?`)) return;
+
+        try {
+            setIsDeleting(true);
+            const { data: { session } } = await supabase.auth.getSession();
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/downloads/bulk-delete`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${session?.access_token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ ids: Array.from(selectedIds) })
+            });
+
+            if (!res.ok) throw new Error('מחיקת הקבצים נכשלה');
+            
+            // Refresh list and clear selection
+            await fetchDownloads();
+            setSelectedIds(new Set());
+        } catch (err) {
+            console.error('Delete error:', err);
+            alert('שגיאה במחיקת הקבצים');
+        } finally {
+            setIsDeleting(false);
+        }
+    };
+
+    const toggleSelect = (id: string) => {
+        const next = new Set(selectedIds);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        setSelectedIds(next);
+    };
+
+    const toggleSelectAll = () => {
+        if (selectedIds.size === filteredDownloads.length) {
+            setSelectedIds(new Set());
+        } else {
+            setSelectedIds(new Set(filteredDownloads.map(d => d.id)));
+        }
+    };
 
     const handleDownload = async (record: DownloadRecord) => {
         try {
@@ -304,6 +351,8 @@ export default function LatestDownloads() {
         { label: 'שנה', value: 365 },
     ];
 
+    const paginationOptions = [10, 15, 20];
+
     return (
         <main className="min-h-screen bg-[#121212] pt-24 pb-12 px-6">
             <div className="max-w-5xl mx-auto">
@@ -320,6 +369,20 @@ export default function LatestDownloads() {
                             <p className="text-zinc-400">Manage and filter your processed files</p>
                         </div>
                     </div>
+
+                    {selectedIds.size > 0 && (
+                        <div className="flex items-center gap-4 animate-in slide-in-from-top-4 duration-300">
+                            <span className="text-zinc-400 text-sm font-medium">נבחרו {selectedIds.size} קבצים</span>
+                            <button
+                                onClick={handleBulkDelete}
+                                disabled={isDeleting}
+                                className="flex items-center gap-2 px-6 py-2.5 bg-red-500 hover:bg-red-600 text-white rounded-xl transition-all shadow-lg shadow-red-500/20 disabled:opacity-50"
+                            >
+                                {isDeleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <CloseIcon className="w-4 h-4" />}
+                                <span className="font-bold">מחק נבחרים</span>
+                            </button>
+                        </div>
+                    )}
                 </div>
 
                 <div className="bg-[#1a1a1a] p-6 rounded-2xl border border-[#333] mb-8 space-y-6">
@@ -355,6 +418,31 @@ export default function LatestDownloads() {
                             </div>
                         </div>
                     </div>
+
+                    <div className="flex items-center justify-between pt-4 border-t border-[#333]">
+                        <div className="flex items-center gap-4">
+                            <button
+                                onClick={toggleSelectAll}
+                                className="text-sm text-blue-500 hover:text-blue-400 font-medium transition-colors"
+                            >
+                                {selectedIds.size === filteredDownloads.length ? 'ביטול בחירה' : 'בחר הכל'}
+                            </button>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <span className="text-sm text-zinc-400">קבצים לעמוד:</span>
+                            <div className="flex gap-1.5">
+                                {paginationOptions.map(opt => (
+                                    <button
+                                        key={opt}
+                                        onClick={() => { setItemsPerPage(opt); setPage(1); }}
+                                        className={`w-8 h-8 rounded-lg text-xs font-bold transition-all ${itemsPerPage === opt ? 'bg-blue-600 text-white' : 'bg-[#252525] text-zinc-400 hover:text-white'}`}
+                                    >
+                                        {opt}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 {loading ? (
@@ -378,9 +466,19 @@ export default function LatestDownloads() {
                             {paginatedDownloads.map((record) => (
                                 <div
                                     key={record.id}
-                                    className="group flex items-center justify-between p-5 bg-[#1a1a1a] border border-[#333] rounded-2xl hover:border-[#444] transition-all duration-300 hover:shadow-xl hover:shadow-black/20"
+                                    className={`group flex items-center justify-between p-5 bg-[#1a1a1a] border transition-all duration-300 rounded-2xl ${
+                                        selectedIds.has(record.id) ? 'border-blue-500/50 bg-blue-500/5' : 'border-[#333] hover:border-[#444]'
+                                    }`}
                                 >
                                     <div className="flex items-center gap-5">
+                                        <div 
+                                            onClick={() => toggleSelect(record.id)}
+                                            className={`w-6 h-6 rounded-lg border-2 flex items-center justify-center cursor-pointer transition-all ${
+                                                selectedIds.has(record.id) ? 'bg-blue-600 border-blue-600 shadow-lg shadow-blue-600/30' : 'border-[#444] hover:border-[#666]'
+                                            }`}
+                                        >
+                                            {selectedIds.has(record.id) && <CloseIcon className="w-4 h-4 text-white p-0.5" />}
+                                        </div>
                                         <div className="p-3 bg-[#252525] rounded-xl group-hover:bg-[#2a2a2a] transition-colors">
                                             <FileText className="w-8 h-8 text-blue-500" />
                                         </div>
