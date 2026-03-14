@@ -65,8 +65,18 @@ def _process_page_for_final(spec: dict, uploads_dir: str, processed_dir: str):
         temp_doc.close()
         return temp_page_pdf
 
+    # Ensure source PDF exists locally
     pdf_path = os.path.join(uploads_dir, f"{file_id}.pdf")
-    
+    if not os.path.exists(pdf_path):
+        from .supabase_service import download_file
+        try:
+            print(f"[Backend] File {file_id}.pdf missing locally, downloading from Supabase...")
+            download_file(file_id, pdf_path)
+        except Exception as e:
+            print(f"[Backend] Failed to download {file_id}.pdf: {e}")
+            # If we can't find it, we'll hit an error later or can raise one now
+            raise FileNotFoundError(f"Source file {file_id}.pdf not found locally or in storage")
+
     if apply_ocr:
         file_processed_dir = os.path.join(processed_dir, file_id)
         os.makedirs(file_processed_dir, exist_ok=True)
@@ -114,9 +124,9 @@ def build_final_pdf(pages_spec: list, output_path: str, uploads_dir: str, proces
     import fitz
     import os
 
-    # Process all pages in parallel
+    # Process all pages in parallel - Limit to 2 workers to avoid memory spikes
     temp_files = []
-    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
+    with ThreadPoolExecutor(max_workers=min(os.cpu_count() or 4, 2)) as executor:
         futures = [
             executor.submit(_process_page_for_final, spec, uploads_dir, processed_dir)
             for spec in pages_spec

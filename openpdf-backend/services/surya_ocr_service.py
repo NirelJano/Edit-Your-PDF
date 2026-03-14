@@ -245,8 +245,8 @@ def run_advanced_ocr(input_pdf_path: str, output_pdf_path: str, turbo: bool = Tr
         logger.info(f"Advanced OCR (Parallel): Processing {num_pages} pages from {input_pdf_path}")
 
         render_dpi = 300 # Reduced from 400 for speed
-        # Use a reasonable number of workers, capping at CPU count
-        max_workers = min(os.cpu_count() or 4, num_pages)
+        # Use a reasonable number of workers, capping at 2 on small servers to avoid OOM
+        max_workers = min(os.cpu_count() or 4, 2, num_pages)
         
         results = []
         with ProcessPoolExecutor(max_workers=max_workers) as executor:

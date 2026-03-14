@@ -68,7 +68,9 @@ allowed_origins = [
     "http://localhost:3000",
     "http://localhost:3001",
     "https://edit-your-pdf.vercel.app",
-    "https://edit-your-pdf-nireljanos-projects.vercel.app"
+    "https://edit-your-pdf-nireljanos-projects.vercel.app",
+    "https://edit-your-pdf-git-main-nireljanos-projects.vercel.app",
+    "https://edit-your-g18z6a2n6-nireljanos-projects.vercel.app"
 ]
 
 frontend_url = os.getenv("FRONTEND_URL")
@@ -200,6 +202,10 @@ async def get_page_image_endpoint(file_id: str, page_num: int):
 @app.post("/api/save")
 async def save_document(req: SaveRequest, user = Depends(get_current_user)):
     import traceback
+    import time
+    save_start_time = time.time()
+    print(f"[Backend] Received save request for {req.filename} (format: {req.format}, pages: {len(req.pages)})")
+    
     try:
         if not req.pages:
             raise HTTPException(status_code=400, detail="No pages provided for the final document")
@@ -207,8 +213,17 @@ async def save_document(req: SaveRequest, user = Depends(get_current_user)):
         output_name = req.filename if req.filename else "OpenPDF_Document"
         tmp_pdf_path = os.path.join(PROCESSED_DIR, f"{uuid.uuid4()}_temp.pdf")
         
-        # Build the combined PDF optionally applying OCR
-        build_final_pdf([p.model_dump() for p in req.pages], tmp_pdf_path, UPLOAD_DIR, PROCESSED_DIR)
+        # Build the combined PDF optionally applying OCR - Offload to threadpool
+        print(f"[Backend] Building final PDF...")
+        build_start = time.time()
+        await run_in_threadpool(
+            build_final_pdf, 
+            [p.model_dump() for p in req.pages], 
+            tmp_pdf_path, 
+            UPLOAD_DIR, 
+            PROCESSED_DIR
+        )
+        print(f"[Backend] PDF building finished in {time.time() - build_start:.2f}s")
         
         if req.format.lower() == "docx":
             output_docx = os.path.join(PROCESSED_DIR, f"{output_name}.docx")
@@ -217,32 +232,38 @@ async def save_document(req: SaveRequest, user = Depends(get_current_user)):
             try:
                 temp_doc = fitz.open(tmp_pdf_path)
                 actual_pages = len(temp_doc)
-                print(f"DEBUG: Starting conversion to DOCX. Source PDF has {actual_pages} pages.")
                 temp_doc.close()
             except Exception as e:
-                print(f"DEBUG Error opening PDF for count: {e}")
                 actual_pages = 0
             
-            convert_to_docx(tmp_pdf_path, output_docx)
+            print(f"[Backend] Starting DOCX conversion for {actual_pages} pages...")
+            conv_start = time.time()
+            await run_in_threadpool(convert_to_docx, tmp_pdf_path, output_docx)
+            print(f"[Backend] DOCX conversion finished in {time.time() - conv_start:.2f}s")
             
             try:
                 # Store the original PDF as a preview version for the History page
                 preview_id = str(uuid.uuid4())
                 preview_storage_path = f"previews/{user.id}/{preview_id}.pdf"
                 
-                # Upload the preview PDF
-                with open(tmp_pdf_path, "rb") as f:
-                    supabase.storage.from_("pdf-storage").upload(preview_storage_path, f)
+                # Upload the preview PDF - Offload
+                print(f"[Backend] Uploading preview and DOCX to Supabase...")
+                def upload_assets():
+                    with open(tmp_pdf_path, "rb") as f:
+                        supabase.storage.from_("pdf-storage").upload(preview_storage_path, f)
+                    
+                    # Record in downloads table
+                    unique_id = str(uuid.uuid4())
+                    storage_path = f"downloads/{user.id}/{unique_id}.docx"
+                    file_size = os.path.exists(output_docx) and os.path.getsize(output_docx) or 0
+                    
+                    # Upload the DOCX
+                    if os.path.exists(output_docx):
+                        with open(output_docx, "rb") as f:
+                            supabase.storage.from_("pdf-storage").upload(storage_path, f)
+                    return storage_path, file_size
                 
-                # Record in downloads table
-                unique_id = str(uuid.uuid4())
-                storage_path = f"downloads/{user.id}/{unique_id}.docx"
-                file_size = os.path.exists(output_docx) and os.path.getsize(output_docx) or 0
-                
-                # Upload the DOCX
-                if os.path.exists(output_docx):
-                    with open(output_docx, "rb") as f:
-                        supabase.storage.from_("pdf-storage").upload(storage_path, f)
+                storage_path, file_size = await run_in_threadpool(upload_assets)
                 
                 data = {
                     "user_id": user.id,
@@ -254,11 +275,11 @@ async def save_document(req: SaveRequest, user = Depends(get_current_user)):
                     "preview_path": preview_storage_path
                 }
                 supabase.table("downloads").insert(data).execute()
-                print(f"Logged DOCX download with preview: {storage_path}")
             except Exception as e:
                 print(f"Failed to log DOCX download or preview: {e}")
                 traceback.print_exc()
 
+            print(f"[Backend] /api/save (DOCX) total time: {time.time() - save_start_time:.2f}s")
             return FileResponse(
                 output_docx, 
                 filename=f"{output_name}.docx", 
@@ -268,20 +289,20 @@ async def save_document(req: SaveRequest, user = Depends(get_current_user)):
             output_pdf = os.path.join(PROCESSED_DIR, f"{output_name}.pdf")
             shutil.move(tmp_pdf_path, output_pdf)
             
-            # Log the download in background or wait? Let's do it here for now to ensure reliability.
-            # We use background tasks if we want it to be faster. 
-            # But the user is waiting for the file anyway.
+            print(f"[Backend] Uploading PDF to Supabase...")
             try:
-                upload_and_log_download(user.id, output_pdf, output_name, "pdf")
+                await run_in_threadpool(upload_and_log_download, user.id, output_pdf, output_name, "pdf")
             except Exception as e:
                 print(f"Failed to log download: {e}")
 
+            print(f"[Backend] /api/save (PDF) total time: {time.time() - save_start_time:.2f}s")
             return FileResponse(
                 output_pdf,
                 filename=f"{output_name}.pdf",
                 media_type="application/pdf"
             )
     except Exception as e:
+        print(f"[Backend] ERROR in /api/save: {str(e)}")
         return JSONResponse(status_code=500, content={"error": str(e), "traceback": traceback.format_exc()})
 
 

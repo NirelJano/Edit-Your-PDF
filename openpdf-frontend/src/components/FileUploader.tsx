@@ -21,9 +21,7 @@ export default function FileUploader({ onFilesAdded }: FileUploaderProps) {
 
         for (const file of acceptedFiles) {
             const fileId = uuidv4();
-            // Sanitize filename: remove non-ASCII characters and replace spaces with underscores
-            const sanitizedName = file.name.replace(/[^\x00-\x7F]/g, "").replace(/\s+/g, "_") || "document.pdf";
-            const filePath = `uploads/${fileId}-${sanitizedName}`;
+            const filePath = `${fileId}.pdf`;
 
             try {
                 const { data: { session } } = await supabase.auth.getSession();
