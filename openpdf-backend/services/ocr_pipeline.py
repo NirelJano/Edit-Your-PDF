@@ -19,7 +19,10 @@ def run_high_quality_ocr(
     input_pdf_path: str,
     output_pdf_path: str,
     engine: str = "advanced",
+    turbo: bool = True,
 ) -> str:
+    import time
+    start_time = time.time()
     """
     Run high-quality OCR on a PDF file.
 
@@ -46,7 +49,7 @@ def run_high_quality_ocr(
             logger.info(f"OCR Pipeline: Trying engine '{eng}' on {input_pdf_path}")
             if eng == "advanced":
                 from .surya_ocr_service import run_advanced_ocr
-                return run_advanced_ocr(input_pdf_path, output_pdf_path)
+                return run_advanced_ocr(input_pdf_path, output_pdf_path, turbo=turbo)
             elif eng == "ocrmypdf":
                 from .ocrmypdf_service import run_hebrew_ocr
                 return run_hebrew_ocr(input_pdf_path, output_pdf_path)
@@ -66,6 +69,8 @@ def run_high_quality_ocr(
     with open("ocr_error.log", "a") as f:
         f.write(error_msg + "\n" + "=" * 40 + "\n")
     raise last_error
+
+    logger.info(f"OCR Pipeline: Completed successfully in {time.time() - start_time:.2f}s")
 
 
 def _get_engine_order(preferred: str) -> list:

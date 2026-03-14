@@ -40,17 +40,16 @@ def _render_page_to_image(page: fitz.Page, dpi: int = 400) -> np.ndarray:
     return np.array(pil_img)
 
 
-def _preprocess_image(img: np.ndarray) -> np.ndarray:
+def _preprocess_image(img: np.ndarray, turbo: bool = False) -> np.ndarray:
     """
     Advanced image preprocessing for optimal OCR quality.
     
     Steps:
       1. Convert to grayscale
       2. Upscale if too small (< 2000px width)
-      3. Denoise with Non-local Means (much better than Gaussian blur)
-      4. Adaptive thresholding (handles uneven lighting/backgrounds)
+      3. Denoise with Fast Blur (lighter than Non-local Means)
+      4. Adaptive thresholding (Gaussian)
       5. Morphological operations to clean up noise
-      6. Sharpen edges
     """
     # 1. Grayscale
     if len(img.shape) == 3:
@@ -64,12 +63,14 @@ def _preprocess_image(img: np.ndarray) -> np.ndarray:
         scale = 2000 / width
         gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     
-    # 3. Denoise with Non-local Means Denoising
-    # Much better than Gaussian blur — preserves edges while removing noise
-    denoised = cv2.fastNlMeansDenoising(gray, None, h=10, templateWindowSize=7, searchWindowSize=21)
+    if turbo:
+        # In turbo mode, just do basic thresholding
+        return cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15)
+
+    # 3. Light Denoising (Gaussian Blur is much faster than fastNlMeansDenoising)
+    denoised = cv2.GaussianBlur(gray, (3, 3), 0)
     
-    # 4. Adaptive thresholding (Gaussian) — handles uneven backgrounds extremely well
-    # This is a key improvement over Otsu's threshold used by default Tesseract
+    # 4. Adaptive thresholding (Gaussian)
     thresh = cv2.adaptiveThreshold(
         denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15
     )
@@ -77,10 +78,6 @@ def _preprocess_image(img: np.ndarray) -> np.ndarray:
     # 5. Morphological opening — removes small noise dots
     kernel = np.ones((2, 2), np.uint8)
     cleaned = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
-    
-    # 6. Slight dilation to connect broken characters
-    kernel_dilate = np.ones((1, 1), np.uint8)
-    cleaned = cv2.dilate(cleaned, kernel_dilate, iterations=1)
     
     return cleaned
 
@@ -189,7 +186,7 @@ def _parse_hocr_lines(hocr_html: str) -> list:
     return results
 
 
-def _process_single_page(page_idx: int, input_pdf_path: str, render_dpi: int):
+def _process_single_page(page_idx: int, input_pdf_path: str, render_dpi: int, turbo: bool = True):
     """Worker function to process a single page for parallel execution."""
     import fitz
     import pytesseract
@@ -205,7 +202,7 @@ def _process_single_page(page_idx: int, input_pdf_path: str, render_dpi: int):
         src_doc.close()
 
         # Step 2: Advanced preprocessing
-        preprocessed = _preprocess_image(img)
+        preprocessed = _preprocess_image(img, turbo=turbo)
         preproc_height, preproc_width = preprocessed.shape[:2]
 
         # Step 3: Run Tesseract with HOCR for positioned text
@@ -233,7 +230,7 @@ def _process_single_page(page_idx: int, input_pdf_path: str, render_dpi: int):
         return {"page_idx": page_idx, "error": str(e)}
 
 
-def run_advanced_ocr(input_pdf_path: str, output_pdf_path: str) -> str:
+def run_advanced_ocr(input_pdf_path: str, output_pdf_path: str, turbo: bool = True) -> str:
     """
     Runs high-quality OCR with advanced image preprocessing in parallel.
     """
@@ -247,7 +244,7 @@ def run_advanced_ocr(input_pdf_path: str, output_pdf_path: str) -> str:
 
         logger.info(f"Advanced OCR (Parallel): Processing {num_pages} pages from {input_pdf_path}")
 
-        render_dpi = 400
+        render_dpi = 300 # Reduced from 400 for speed
         # Use a reasonable number of workers, capping at CPU count
         max_workers = min(os.cpu_count() or 4, num_pages)
         
@@ -255,7 +252,7 @@ def run_advanced_ocr(input_pdf_path: str, output_pdf_path: str) -> str:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             # Map page indices to worker function
             futures = [
-                executor.submit(_process_single_page, i, input_pdf_path, render_dpi)
+                executor.submit(_process_single_page, i, input_pdf_path, render_dpi, turbo)
                 for i in range(num_pages)
             ]
             for future in futures:

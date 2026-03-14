@@ -32,11 +32,14 @@ export default function FileUploader({ onFilesAdded }: FileUploaderProps) {
 
                 if (!userId || !token) throw new Error("User must be logged in to upload files");
                 // 1. Upload to Supabase Storage
+                console.log(`[Frontend] Starting Supabase upload for ${file.name}...`);
+                const uploadStartTime = performance.now();
                 const { error: uploadError } = await supabase.storage
                     .from('pdf-storage')
                     .upload(filePath, file);
 
                 if (uploadError) throw uploadError;
+                console.log(`[Frontend] Supabase upload finished in ${((performance.now() - uploadStartTime) / 1000).toFixed(2)}s`);
 
                 const { data: { publicUrl } } = supabase.storage
                     .from('pdf-storage')
@@ -58,6 +61,8 @@ export default function FileUploader({ onFilesAdded }: FileUploaderProps) {
                 if (dbError) throw dbError;
 
                 // 3. Notify backend to process (get page count/images)
+                console.log(`[Frontend] Sending ${file.name} to backend/api/upload...`);
+                const backendStartTime = performance.now();
                 const formData = new FormData();
                 formData.append('file', file);
                 formData.append('fileId', fileId);
@@ -71,18 +76,22 @@ export default function FileUploader({ onFilesAdded }: FileUploaderProps) {
                 });
 
                 if (!res.ok) throw new Error('Backend upload/processing failed');
+                console.log(`[Frontend] Backend processing finished in ${((performance.now() - backendStartTime) / 1000).toFixed(2)}s`);
 
                 // 4. Trigger OCR if enabled
                 const { isOCREnabled, setIsProcessing } = useOcrStore.getState();
                 if (isOCREnabled) {
+                    console.log(`[Frontend] Triggering background OCR for ${file.name}...`);
                     setIsProcessing(true);
                     try {
+                        const ocrStartTime = performance.now();
                         await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/ocr/${fileId}`, {
                             method: 'POST',
                             headers: {
                                 'Authorization': `Bearer ${token}`
                             }
                         });
+                        console.log(`[Frontend] Background OCR request sent in ${((performance.now() - ocrStartTime) / 1000).toFixed(2)}s`);
                         // OCR is a background task, so we don't necessarily wait for it to finish 
                         // to show the pages, but we set the status.
                     } catch (ocrErr) {

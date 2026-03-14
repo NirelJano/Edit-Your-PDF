@@ -55,6 +55,7 @@ async def cleanup_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Start the cleanup task
+    print(f"--- [Backend] Starting {app.title} v{app.version} ---")
     task = asyncio.create_task(cleanup_loop())
     yield
     # Shutdown: Clean up task if needed
@@ -128,6 +129,8 @@ async def upload_pdf(
     fileId: Optional[str] = Form(None),
     user = Depends(get_current_user)
 ):
+    upload_start_time = time.time()
+    print(f"[Backend] Received upload request for {file.filename}")
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
         
@@ -152,6 +155,9 @@ async def upload_pdf(
             supabase.table("files").update({"status": "processing"}).eq("id", file_id).execute()
         
         await run_in_threadpool(update_supabase)
+    
+    upload_end_time = time.time()
+    print(f"[Backend] /api/upload finished in {upload_end_time - upload_start_time:.2f}s for {file.filename} ({page_count} pages)")
     
     return JSONResponse({
         "fileId": file_id,
@@ -283,6 +289,7 @@ async def save_document(req: SaveRequest, user = Depends(get_current_user)):
 async def process_ocr(
     file: UploadFile = File(...),
     engine: Optional[str] = Form("surya"),
+    turbo: Optional[bool] = Form(True),
     user = Depends(get_current_user)
 ):
     """
@@ -292,6 +299,8 @@ async def process_ocr(
 
     engine: "surya" (best quality, default) or "ocrmypdf" (fast fallback)
     """
+    ocr_start_time = time.time()
+    print(f"[Backend] Received direct OCR request for {file.filename} with engine={engine}")
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
 
@@ -304,7 +313,7 @@ async def process_ocr(
             shutil.copyfileobj(file.file, buf)
 
         try:
-            run_high_quality_ocr(input_path, output_path, engine=engine or "surya")
+            run_high_quality_ocr(input_path, output_path, engine=engine or "surya", turbo=turbo)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"OCR processing failed: {str(e)}")
 
@@ -317,6 +326,9 @@ async def process_ocr(
     except Exception as e:
         print(f"Failed to log OCR download: {e}")
 
+    ocr_end_time = time.time()
+    print(f"[Backend] /api/process-ocr finished in {ocr_end_time - ocr_start_time:.2f}s for {file.filename}")
+    
     return FileResponse(
         output_path,
         filename=download_name,
@@ -334,7 +346,7 @@ async def run_ocr_background(file_id: str):
             download_file(file_id, input_path)
             
             # 2. Run OCR with pipeline (Surya first, ocrmypdf fallback)
-            run_high_quality_ocr(input_path, output_path)
+            run_high_quality_ocr(input_path, output_path, turbo=True)
             
             # 3. Upload back to Supabase
             upload_file(file_id, output_path)

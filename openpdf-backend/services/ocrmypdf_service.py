@@ -41,7 +41,7 @@ def run_hebrew_ocr(input_pdf_path: str, output_pdf_path: str) -> str:
             output_type="pdf",                 # Standard PDF output
             rotate_pages=True,                 # Auto-detect and fix page orientation
             clean=True,                        # Clean pages with unpaper before OCR
-            oversample=400,                    # Upsample low-DPI images to 400 DPI
+            oversample=300,                    # Reduced from 400 for speed
             skip_big=50,                       # Skip images > 50 megapixels to avoid timeouts
             tesseract_timeout=300,             # 5 min timeout per page for complex pages
             tesseract_config=[
