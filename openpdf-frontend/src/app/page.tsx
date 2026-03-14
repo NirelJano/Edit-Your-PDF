@@ -80,6 +80,9 @@ export default function Home() {
             const statusRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/save/status/${data.jobId}`);
             
             if (!statusRes.ok) {
+              if (statusRes.status === 404) {
+                throw new Error("Save job not found. The server may have restarted. Please try saving again.");
+              }
               const errData = await statusRes.json().catch(() => ({}));
               throw new Error(`Save job failed: ${errData.error || statusRes.statusText}`);
             }

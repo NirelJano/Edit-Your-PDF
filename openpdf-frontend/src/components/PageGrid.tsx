@@ -74,14 +74,14 @@ function SortablePage({ page, onToggleSelect, onRotate, onDelete, onDuplicate, o
             <div className="absolute top-2 right-2 z-20 flex gap-1 items-center opacity-0 group-hover:opacity-100 transition-opacity" onMouseDown={(e) => e.stopPropagation()}>
                 <button
                     onClick={(e) => { e.stopPropagation(); onPreview(page); }}
-                    className="p-1 bgColor-[#1a1a1a] bg-black/40 hover:bg-black/60 backdrop-blur-sm rounded text-white transition-colors"
+                    className="p-1 bg-[#1a1a1a] bg-black/40 hover:bg-black/60 backdrop-blur-sm rounded text-white transition-colors"
                     title="Preview Page"
                 >
                     <Eye className="w-4 h-4" />
                 </button>
                 <button
                     onClick={(e) => { e.stopPropagation(); onRotate(page.id, 'ccw'); }}
-                    className="p-1 bgColor-[#1a1a1a] bg-black/40 hover:bg-black/60 backdrop-blur-sm rounded text-white transition-colors"
+                    className="p-1 bg-[#1a1a1a] bg-black/40 hover:bg-black/60 backdrop-blur-sm rounded text-white transition-colors"
                     title="Rotate Left"
                 >
                     <RotateCcw className="w-4 h-4" />

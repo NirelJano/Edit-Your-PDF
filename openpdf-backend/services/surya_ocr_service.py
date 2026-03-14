@@ -244,14 +244,31 @@ def run_advanced_ocr(input_pdf_path: str, output_pdf_path: str, turbo: bool = Tr
 
         logger.info(f"Advanced OCR (Parallel): Processing {num_pages} pages from {input_pdf_path}")
 
-        render_dpi = 200 # Reduced from 300/400 for speed and memory safety
+        render_dpi = 200  # Balanced: good quality and memory-safe
         results = []
 
-        # Process sequentially to avoid OOM
-        logger.info("  Processing pages sequentially to prevent memory spikes...")
-        for i in range(num_pages):
-            res = _process_single_page(i, input_pdf_path, render_dpi, turbo)
-            results.append(res)
+        # Process pages in parallel (2 workers) for ~2x speedup.
+        # ThreadPoolExecutor is safe here: pytesseract and OpenCV release the GIL
+        # for their C extensions, allowing true parallelism.
+        # max_workers=2 keeps memory usage within bounds on constrained servers.
+        import time as _time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        logger.info(f"  Processing {num_pages} pages in parallel (max_workers=2)...")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_to_idx = {
+                executor.submit(_process_single_page, i, input_pdf_path, render_dpi, turbo): i
+                for i in range(num_pages)
+            }
+            for future in as_completed(future_to_idx):
+                page_idx = future_to_idx[future]
+                try:
+                    res = future.result()
+                    results.append(res)
+                    logger.info(f"  Page {page_idx + 1}/{num_pages} OCR complete")
+                except Exception as exc:
+                    logger.error(f"  Page {page_idx + 1} generated an exception: {exc}")
+                    results.append({"page_idx": page_idx, "error": str(exc)})
 
         # Sort results by page index to ensure order
         results.sort(key=lambda x: x["page_idx"])

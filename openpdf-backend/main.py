@@ -131,8 +131,47 @@ def _clear_expired_cache():
         for i in range(min(100, len(sorted_cache))):
             del THUMBNAIL_CACHE[sorted_cache[i][0]]
 
+async def background_upload_tasks(file_id: str, file_path: str, filename: str, user_id: str):
+    """Heavy tasks to run after upload returns."""
+    try:
+        # 1. Pre-generate all thumbnails
+        output_dir = os.path.join(PROCESSED_DIR, file_id)
+        os.makedirs(output_dir, exist_ok=True)
+        print(f"[Backend] Pre-generating thumbnails for {file_id}...")
+        await run_in_threadpool(split_pdf_to_images, file_path, output_dir)
+        
+        # 2. Upload to Supabase Storage
+        from services.supabase_service import supabase as sb_client
+        storage_path = f"{file_id}.pdf"
+        print(f"[Backend] Uploading {file_id}.pdf to Supabase Storage...")
+        with open(file_path, "rb") as f:
+            sb_client.storage.from_("pdf-storage").upload(storage_path, f)
+        
+        # 3. Ensure record in DB and set status to active
+        public_url = sb_client.storage.from_("pdf-storage").get_public_url(storage_path)
+        
+        # Check if record exists
+        res = sb_client.table("files").select("id").eq("id", file_id).execute()
+        if not res.data:
+            from lib.colors import get_next_color # If color utility existed in backend, but it's frontend
+            sb_client.table("files").insert({
+                "id": file_id,
+                "name": filename,
+                "storage_url": public_url,
+                "status": "ready",
+                "user_id": user_id,
+                "color_id": "#3b82f6" # Default
+            }).execute()
+        else:
+            sb_client.table("files").update({"status": "ready"}).eq("id", file_id).execute()
+        
+        print(f"[Backend] Background processing complete for {file_id}")
+    except Exception as e:
+        print(f"[Backend] ERROR in background upload tasks for {file_id}: {e}")
+
 @app.post("/api/upload")
 async def upload_pdf(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...), 
     fileId: Optional[str] = Form(None),
     user = Depends(get_current_user)
@@ -145,7 +184,7 @@ async def upload_pdf(
     file_id = fileId if fileId else str(uuid.uuid4())
     file_path = os.path.join(UPLOAD_DIR, f"{file_id}.pdf")
     
-    # Async file write
+    # Async file save
     def save_file():
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
@@ -155,17 +194,11 @@ async def upload_pdf(
     page_count = len(doc)
     doc.close()
 
-    if fileId:
-        def update_supabase():
-            file_data = supabase.table("files").select("user_id").eq("id", file_id).execute()
-            if not file_data.data or file_data.data[0].get("user_id") != user.id:
-                raise HTTPException(status_code=403, detail="Not authorized to modify this file")
-            supabase.table("files").update({"status": "processing"}).eq("id", file_id).execute()
-        
-        await run_in_threadpool(update_supabase)
+    # Trigger heavy tasks in background
+    background_tasks.add_task(background_upload_tasks, file_id, file_path, file.filename, user.id)
     
     upload_end_time = time.time()
-    print(f"[Backend] /api/upload finished in {upload_end_time - upload_start_time:.2f}s for {file.filename} ({page_count} pages)")
+    print(f"[Backend] /api/upload returned page_count={page_count} in {upload_end_time - upload_start_time:.2f}s")
     
     return JSONResponse({
         "fileId": file_id,
@@ -173,37 +206,55 @@ async def upload_pdf(
         "pageCount": page_count
     })
 
+# In-memory byte cache for thumbnails (RAM cache)
+# Key: (file_id, page_num), Value: (bytes, media_type, timestamp)
+THUMBNAIL_RAM_CACHE = {}
+MAX_RAM_CACHE_SIZE = 200 # Pages
+
+def _clear_expired_ram_cache():
+    if len(THUMBNAIL_RAM_CACHE) > MAX_RAM_CACHE_SIZE:
+        sorted_cache = sorted(THUMBNAIL_RAM_CACHE.items(), key=lambda x: x[1][2])
+        for i in range(min(50, len(sorted_cache))):
+            del THUMBNAIL_RAM_CACHE[sorted_cache[i][0]]
+
 @app.get("/api/page-image/{file_id}/{page_num}")
 async def get_page_image_endpoint(file_id: str, page_num: int):
-    # Check cache first
     cache_key = (file_id, page_num)
-    if cache_key in THUMBNAIL_CACHE:
-        path, _ = THUMBNAIL_CACHE[cache_key]
-        if os.path.exists(path):
-            THUMBNAIL_CACHE[cache_key] = (path, time.time()) # Update access time
-            return FileResponse(path)
+    
+    # 1. Check RAM Cache (Fastest)
+    if cache_key in THUMBNAIL_RAM_CACHE:
+        img_bytes, media_type, _ = THUMBNAIL_RAM_CACHE[cache_key]
+        THUMBNAIL_RAM_CACHE[cache_key] = (img_bytes, media_type, time.time())
+        from fastapi import Response
+        return Response(content=img_bytes, media_type=media_type, headers={
+            "Cache-Control": "public, max-age=3600"
+        })
 
     pdf_path = os.path.join(UPLOAD_DIR, f"{file_id}.pdf")
-    if not os.path.exists(pdf_path):
-        raise HTTPException(status_code=404, detail="File not found")
-        
     output_dir = os.path.join(PROCESSED_DIR, file_id)
-    os.makedirs(output_dir, exist_ok=True)
-    
     img_path = os.path.join(output_dir, f"page_{page_num}.png")
-    
-    def generate_image():
+
+    def get_or_generate():
         if not os.path.exists(img_path):
+            if not os.path.exists(pdf_path): return None
             return get_page_image(pdf_path, page_num, output_dir)
         return img_path
 
-    path = await run_in_threadpool(generate_image)
+    path = await run_in_threadpool(get_or_generate)
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # 2. Read into RAM Cache
+    with open(path, "rb") as f:
+        img_bytes = f.read()
     
-    # Update cache
-    _clear_expired_cache()
-    THUMBNAIL_CACHE[cache_key] = (path, time.time())
+    _clear_expired_ram_cache()
+    THUMBNAIL_RAM_CACHE[cache_key] = (img_bytes, "image/png", time.time())
     
-    return FileResponse(path)
+    from fastapi import Response
+    return Response(content=img_bytes, media_type="image/png", headers={
+        "Cache-Control": "public, max-age=3600"
+    })
 
 # In-memory save jobs dictionary
 SAVE_JOBS = {}

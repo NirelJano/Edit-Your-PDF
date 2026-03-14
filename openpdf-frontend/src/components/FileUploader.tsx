@@ -17,92 +17,48 @@ export default function FileUploader({ onFilesAdded }: FileUploaderProps) {
     const supabase = createClient();
 
     const onDrop = useCallback(async (acceptedFiles: File[]) => {
-        const newPdfFiles: PDFFile[] = [];
+        const { data: { session } } = await supabase.auth.getSession();
+        const token = session?.access_token;
+        if (!token) {
+            console.error("User not authenticated");
+            return;
+        }
 
-        for (const file of acceptedFiles) {
+        console.log(`[Frontend] Processing ${acceptedFiles.length} files...`);
+        const startTime = performance.now();
+
+        // Process all files in parallel for maximum speed
+        const results = await Promise.all(acceptedFiles.map(async (file) => {
             const fileId = uuidv4();
-            const filePath = `${fileId}.pdf`;
-
+            const color = getNextColor();
+            
             try {
-                const { data: { session } } = await supabase.auth.getSession();
-                const userId = session?.user?.id;
-                const token = session?.access_token;
-
-                if (!userId || !token) throw new Error("User must be logged in to upload files");
-                // 1. Upload to Supabase Storage
-                console.log(`[Frontend] Starting Supabase upload for ${file.name}...`);
-                const uploadStartTime = performance.now();
-                const { error: uploadError } = await supabase.storage
-                    .from('pdf-storage')
-                    .upload(filePath, file);
-
-                if (uploadError) throw uploadError;
-                console.log(`[Frontend] Supabase upload finished in ${((performance.now() - uploadStartTime) / 1000).toFixed(2)}s`);
-
-                const { data: { publicUrl } } = supabase.storage
-                    .from('pdf-storage')
-                    .getPublicUrl(filePath);
-
-                // 2. Save metadata to Supabase DB
-                const color = getNextColor();
-                const { error: dbError } = await supabase
-                    .from('files')
-                    .insert({
-                        id: fileId,
-                        name: file.name,
-                        storage_url: publicUrl,
-                        color_id: color,
-                        status: 'pending',
-                        user_id: userId
-                    });
-
-                if (dbError) throw dbError;
-
-                // 3. Notify backend to process (get page count/images)
-                console.log(`[Frontend] Sending ${file.name} to backend/api/upload...`);
-                const backendStartTime = performance.now();
+                // 1. Single Upload to Backend
                 const formData = new FormData();
                 formData.append('file', file);
                 formData.append('fileId', fileId);
 
                 const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/upload`, {
                     method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${token}`
-                    },
+                    headers: { 'Authorization': `Bearer ${token}` },
                     body: formData,
                 });
 
-                if (!res.ok) throw new Error('Backend upload/processing failed');
-                console.log(`[Frontend] Backend processing finished in ${((performance.now() - backendStartTime) / 1000).toFixed(2)}s`);
-
-                // 4. Trigger OCR if enabled
+                if (!res.ok) throw new Error(`Upload failed for ${file.name}`);
+                const data = await res.json();
+                
+                // 2. Trigger OCR if enabled (Fire and forget, backend handles it)
                 const { isOCREnabled, setIsProcessing } = useOcrStore.getState();
                 if (isOCREnabled) {
-                    console.log(`[Frontend] Triggering background OCR for ${file.name}...`);
                     setIsProcessing(true);
-                    try {
-                        const ocrStartTime = performance.now();
-                        await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/ocr/${fileId}`, {
-                            method: 'POST',
-                            headers: {
-                                'Authorization': `Bearer ${token}`
-                            }
-                        });
-                        console.log(`[Frontend] Background OCR request sent in ${((performance.now() - ocrStartTime) / 1000).toFixed(2)}s`);
-                        // OCR is a background task, so we don't necessarily wait for it to finish 
-                        // to show the pages, but we set the status.
-                    } catch (ocrErr) {
-                        console.error('Failed to trigger OCR:', ocrErr);
-                    } finally {
-                        setIsProcessing(false);
-                    }
+                    fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/ocr/${fileId}`, {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    }).catch(e => console.error('OCR trigger failed:', e))
+                      .finally(() => setIsProcessing(false));
                 }
 
-                const data = await res.json();
-                const pageCount = data.pageCount;
-
-                const pages: PDFPage[] = Array.from({ length: pageCount }).map((_, i) => ({
+                const pages: PDFPage[] = Array.from({ length: data.pageCount }).map((_, i) => ({
                     id: uuidv4(),
                     fileId: fileId,
                     originalPageNum: i + 1,
@@ -110,22 +66,27 @@ export default function FileUploader({ onFilesAdded }: FileUploaderProps) {
                     imageUrl: `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/page-image/${fileId}/${i + 1}`
                 }));
 
-                newPdfFiles.push({
+                return {
                     id: fileId,
                     name: file.name,
                     color: color,
                     file: file,
                     pages: pages
-                });
+                } as PDFFile;
             } catch (err) {
-                console.error('Error uploading file:', file.name, err);
+                console.error('Error processing file:', file.name, err);
+                alert(`שגיאה בהעלאת הקובץ ${file.name}: ${err instanceof Error ? err.message : 'שגיאה לא ידועה'}`);
+                return null;
             }
-        }
+        }));
 
+        const newPdfFiles = results.filter((f): f is PDFFile => f !== null);
         if (newPdfFiles.length > 0) {
             onFilesAdded(newPdfFiles);
         }
-    }, [onFilesAdded]);
+        
+        console.log(`[Frontend] All files processed in ${((performance.now() - startTime) / 1000).toFixed(2)}s`);
+    }, [onFilesAdded, supabase]);
 
     const { getRootProps, getInputProps, isDragActive } = useDropzone({
         onDrop,
@@ -136,17 +97,25 @@ export default function FileUploader({ onFilesAdded }: FileUploaderProps) {
         multiple: true
     });
 
-    // Provide a unique key to the input element so it resets its value after drop
-    // this allows the same file to be selected again
     return (
         <div
-            {...getRootProps()}
+            {...getRootProps({
+                // Pass onClick into getRootProps so react-dropzone merges it
+                // with its own click handler (which opens the file picker).
+                // Overriding onClick outside would silently disable file selection.
+                onClick: (e) => {
+                    const inputElement = e.currentTarget.querySelector('input');
+                    if (inputElement) {
+                        inputElement.value = '';
+                    }
+                }
+            })}
             className={`border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-colors ${isDragActive
                 ? 'border-blue-500 bg-blue-500/10'
                 : 'border-[#444444] hover:border-[#666666] bg-[#1a1a1a]'
                 }`}
         >
-            <input {...getInputProps()} key={Date.now()} />
+            <input {...getInputProps()} />
             <UploadCloud className="w-12 h-12 mx-auto mb-4 text-zinc-400" />
             <h3 className="text-xl font-medium mb-2 text-white">
                 {isDragActive ? 'Drop PDFs here' : 'Drag & Drop PDFs'}
