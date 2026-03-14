@@ -1,6 +1,11 @@
 import fitz
 import os
+import threading
 from .ocr_pipeline import run_high_quality_ocr
+
+# Global lock to prevent concurrent downloads of the same file
+_download_lock = threading.Lock()
+_local_files_cache = set()
 
 def split_pdf_to_images(pdf_path: str, output_dir: str) -> list:
     """
@@ -67,15 +72,17 @@ def _process_page_for_final(spec: dict, uploads_dir: str, processed_dir: str):
 
     # Ensure source PDF exists locally
     pdf_path = os.path.join(uploads_dir, f"{file_id}.pdf")
-    if not os.path.exists(pdf_path):
-        from .supabase_service import download_file
-        try:
-            print(f"[Backend] File {file_id}.pdf missing locally, downloading from Supabase...")
-            download_file(file_id, pdf_path)
-        except Exception as e:
-            print(f"[Backend] Failed to download {file_id}.pdf: {e}")
-            # If we can't find it, we'll hit an error later or can raise one now
-            raise FileNotFoundError(f"Source file {file_id}.pdf not found locally or in storage")
+    
+    with _download_lock:
+        if not os.path.exists(pdf_path):
+            from .supabase_service import download_file
+            try:
+                print(f"[Backend] Worker: {file_id}.pdf missing locally, downloading from Supabase...")
+                download_file(file_id, pdf_path)
+                print(f"[Backend] Worker: {file_id}.pdf downloaded successfully")
+            except Exception as e:
+                print(f"[Backend] Worker: Failed to download {file_id}.pdf: {e}")
+                raise FileNotFoundError(f"Source file {file_id}.pdf not found")
 
     if apply_ocr:
         file_processed_dir = os.path.join(processed_dir, file_id)
@@ -131,10 +138,14 @@ def build_final_pdf(pages_spec: list, output_path: str, uploads_dir: str, proces
             executor.submit(_process_page_for_final, spec, uploads_dir, processed_dir)
             for spec in pages_spec
         ]
-        for future in futures:
+        total = len(futures)
+        for i, future in enumerate(futures):
             temp_files.append(future.result())
+            if (i + 1) % 5 == 0 or i + 1 == total:
+                print(f"[Backend] Build Progress: {i + 1}/{total} pages processed")
 
     # Build the final document from ordered temp files
+    print(f"[Backend] Merging {len(temp_files)} pages into final PDF...")
     final_doc = fitz.open()
     for temp_file in temp_files:
         if os.path.exists(temp_file):

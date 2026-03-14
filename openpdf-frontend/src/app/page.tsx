@@ -32,6 +32,7 @@ export default function Home() {
   };
 
   const handleSave = async (filename: string, format: 'pdf' | 'docx', pagesToSave: PDFPage[] = pages) => {
+    console.log(`[Frontend] handleSave triggered: ${filename}.${format}, pages: ${pagesToSave.length}`);
     try {
       setIsSaving(true);
       const supabase = createClient();
@@ -50,6 +51,8 @@ export default function Home() {
         }))
       };
 
+      console.log(`[Frontend] Sending save request to backend...`);
+      const saveStartTime = performance.now();
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/save`, {
         method: 'POST',
         headers: {
@@ -59,9 +62,18 @@ export default function Home() {
         body: JSON.stringify(payload)
       });
 
-      if (!res.ok) throw new Error('Save failed');
+      const duration = ((performance.now() - saveStartTime) / 1000).toFixed(2);
+      console.log(`[Frontend] /api/save response received in ${duration}s, status: ${res.status}`);
 
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ error: 'Unknown error' }));
+        console.error('[Frontend] Save failed on backend:', errData);
+        throw new Error(`Save failed: ${errData.error || res.statusText}`);
+      }
+
+      console.log('[Frontend] Starting blob download...');
       const blob = await res.blob();
+      console.log(`[Frontend] Blob received, size: ${(blob.size / 1024).toFixed(2)} KB`);
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;

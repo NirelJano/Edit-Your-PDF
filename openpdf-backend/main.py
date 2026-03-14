@@ -54,8 +54,14 @@ async def cleanup_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Performance Optimization: Limit OpenMP threads for Tesseract/PyMuPDF
+    import os
+    os.environ["OMP_THREAD_LIMIT"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    
     # Startup: Start the cleanup task
     print(f"--- [Backend] Starting {app.title} v{app.version} ---")
+    print(f"[Backend] Worker processes will be limited to prevent OOM/CPU starvation")
     task = asyncio.create_task(cleanup_loop())
     yield
     # Shutdown: Clean up task if needed
@@ -265,16 +271,20 @@ async def save_document(req: SaveRequest, user = Depends(get_current_user)):
                 
                 storage_path, file_size = await run_in_threadpool(upload_assets)
                 
-                data = {
-                    "user_id": user.id,
-                    "name": output_name,
-                    "format": "docx",
-                    "storage_path": storage_path,
-                    "file_size": file_size,
-                    "page_count": actual_pages,
-                    "preview_path": preview_storage_path
-                }
-                supabase.table("downloads").insert(data).execute()
+                print(f"[Backend] Recording DOCX in database...")
+                def record_db():
+                    data = {
+                        "user_id": user.id,
+                        "name": output_name,
+                        "format": "docx",
+                        "storage_path": storage_path,
+                        "file_size": file_size,
+                        "page_count": actual_pages,
+                        "preview_path": preview_storage_path
+                    }
+                    return supabase.table("downloads").insert(data).execute()
+                
+                await run_in_threadpool(record_db)
             except Exception as e:
                 print(f"Failed to log DOCX download or preview: {e}")
                 traceback.print_exc()

@@ -16,11 +16,15 @@ else:
     print("WARNING: Supabase URL is placeholder or missing. 'supabase' service client not initialized.")
 
 def download_file(file_id: str, destination_path: str):
-    """Downloads a file from Supabase storage."""
     file_path = f"{file_id}.pdf"
-    with open(destination_path, "wb") as f:
+    # Use a timeout if supported by the client, or just wrap in try/except
+    try:
         res = supabase.storage.from_(BUCKET_NAME).download(file_path)
-        f.write(res)
+        with open(destination_path, "wb") as f:
+            f.write(res)
+    except Exception as e:
+        print(f"[Supabase] Error downloading {file_id}: {e}")
+        raise e
     return destination_path
 
 def upload_file(file_id: str, file_path: str, custom_path: str = None):
