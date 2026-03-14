@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { createClient } from '@/utils/supabase/client';
 import { useRouter } from 'next/navigation';
 import { FileText, Download, ArrowLeft, Loader2, Calendar, FileType, Eye, ChevronLeft, ChevronRight, X as CloseIcon } from 'lucide-react';
@@ -26,42 +26,48 @@ function HistoryPreviewModal({ state, onClose }: { state: PreviewState | null, o
     const [pageImg, setPageImg] = useState<{ url: string, page: number } | null>(null);
     const [loading, setLoading] = useState(false);
     const [currentPage, setCurrentPage] = useState(0);
+    const [preloadedPages, setPreloadedPages] = useState<Record<number, string>>({});
+    const preloadingRef = useRef<Set<number>>(new Set());
 
     const supabase = createClient();
 
-    // Cleanup object URLs to prevent memory leaks
+    // Reset everything when modal closes or new file opens
     useEffect(() => {
-        return () => {
+        if (!state) {
+            // Cleanup ALL preloaded URLs
+            Object.values(preloadedPages).forEach(url => URL.revokeObjectURL(url));
             if (pageImg?.url) URL.revokeObjectURL(pageImg.url);
-        };
-    }, [pageImg]);
-
-    useEffect(() => {
-        if (state) {
+            setPreloadedPages({});
+            setPageImg(null);
+            preloadingRef.current.clear();
+        } else {
             setCurrentPage(0);
         }
     }, [state]);
 
+    // Main fetch / display logic
     useEffect(() => {
         if (!state) return;
 
-        const fetchPage = async () => {
+        const fetchPage = async (pageIdx: number) => {
+            // Check cache first
+            if (preloadedPages[pageIdx]) {
+                setPageImg({ url: preloadedPages[pageIdx], page: pageIdx });
+                return;
+            }
+
             setLoading(true);
             try {
                 const { data: { session } } = await supabase.auth.getSession();
-                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/downloads/page/${state.downloadId}/${currentPage + 1}`, {
-                    headers: {
-                        'Authorization': `Bearer ${session?.access_token}`
-                    }
+                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/downloads/page/${state.downloadId}/${pageIdx + 1}`, {
+                    headers: { 'Authorization': `Bearer ${session?.access_token}` }
                 });
                 if (!res.ok) throw new Error('Failed to fetch page');
                 const blob = await res.blob();
                 const newUrl = URL.createObjectURL(blob);
 
-                setPageImg(prev => {
-                    if (prev?.url) URL.revokeObjectURL(prev.url);
-                    return { url: newUrl, page: currentPage };
-                });
+                setPreloadedPages(prev => ({ ...prev, [pageIdx]: newUrl }));
+                setPageImg({ url: newUrl, page: pageIdx });
             } catch (err) {
                 console.error(err);
             } finally {
@@ -69,8 +75,43 @@ function HistoryPreviewModal({ state, onClose }: { state: PreviewState | null, o
             }
         };
 
-        fetchPage();
+        fetchPage(currentPage);
     }, [state, currentPage, supabase.auth]);
+
+    // Background Preloader Loop
+    useEffect(() => {
+        if (!state) return;
+
+        const startPreloading = async () => {
+            const { data: { session } } = await supabase.auth.getSession();
+            const token = session?.access_token;
+
+            // Loop through all pages and fetch ones we don't have
+            for (let i = 0; i < state.pageCount; i++) {
+                if (preloadedPages[i] || preloadingRef.current.has(i)) continue;
+
+                preloadingRef.current.add(i);
+                
+                // Fetch in background (don't await the whole loop, just the fetch)
+                fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/downloads/page/${state.downloadId}/${i + 1}`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                }).then(async res => {
+                    if (res.ok) {
+                        const blob = await res.blob();
+                        const url = URL.createObjectURL(blob);
+                        setPreloadedPages(prev => ({ ...prev, [i]: url }));
+                    }
+                }).catch(() => {
+                    preloadingRef.current.delete(i); // Allow retry if failed
+                });
+
+                // Small delay between background requests to avoid overwhelming the browser/server
+                await new Promise(r => setTimeout(r, 300));
+            }
+        };
+
+        startPreloading();
+    }, [state]);
 
     if (!state) return null;
 
@@ -82,13 +123,13 @@ function HistoryPreviewModal({ state, onClose }: { state: PreviewState | null, o
                 </button>
 
                 <div className="relative group bg-[#1a1a1a] rounded-2xl overflow-hidden shadow-2xl border border-white/5 aspect-[1/1.4] max-h-[85vh] flex items-center justify-center">
-                    {loading && (
+                    {loading && !preloadedPages[currentPage] && (
                         <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/20 backdrop-blur-sm">
                             <Loader2 className="w-10 h-10 text-blue-500 animate-spin" />
                         </div>
                     )}
-                    {pageImg && pageImg.page === currentPage ? (
-                        <img src={pageImg.url} alt={`Page ${currentPage + 1}`} className="w-full h-full object-contain" />
+                    {preloadedPages[currentPage] ? (
+                        <img src={preloadedPages[currentPage]} alt={`Page ${currentPage + 1}`} className="w-full h-full object-contain" />
                     ) : (
                         <div className="flex flex-col items-center text-zinc-500">
                             <FileText className="w-12 h-12 mb-2 opacity-20" />
