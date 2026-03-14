@@ -12,3 +12,4 @@ pdf2docx
 supabase
 uuid
 asyncio
+ocrmypdf
