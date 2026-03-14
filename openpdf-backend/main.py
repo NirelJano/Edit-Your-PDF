@@ -547,6 +547,17 @@ async def get_download_info(download_id: str, user = Depends(get_current_user)):
 @app.get("/api/downloads/page/{download_id}/{page_num}")
 async def get_download_page_image(download_id: str, page_num: int, user = Depends(get_current_user)):
     """Note: page_num is 1-indexed."""
+    cache_key = (f"download_{download_id}", page_num)
+    
+    # 1. Check RAM Cache (Fastest)
+    if cache_key in THUMBNAIL_RAM_CACHE:
+        img_bytes, media_type, _ = THUMBNAIL_RAM_CACHE[cache_key]
+        THUMBNAIL_RAM_CACHE[cache_key] = (img_bytes, media_type, time.time())
+        from fastapi import Response
+        return Response(content=img_bytes, media_type=media_type, headers={
+            "Cache-Control": "public, max-age=3600"
+        })
+
     try:
         # Fetch record and check ownership
         res = supabase.table("downloads").select("*").eq("id", download_id).execute()
@@ -571,10 +582,27 @@ async def get_download_page_image(download_id: str, page_num: int, user = Depend
         os.makedirs(output_dir, exist_ok=True)
         img_path = os.path.join(output_dir, f"page_{page_num}.png")
         
-        if not os.path.exists(img_path):
-            from services.pdf_service import get_page_image
-            get_page_image(local_path, page_num, output_dir)
+        def provide_image():
+            if not os.path.exists(img_path):
+                from services.pdf_service import get_page_image
+                return get_page_image(local_path, page_num, output_dir)
+            return img_path
             
-        return FileResponse(img_path)
+        path = await run_in_threadpool(provide_image)
+        if not path or not os.path.exists(path):
+            raise HTTPException(status_code=404, detail="Image not found")
+
+        # 2. Read into RAM Cache
+        with open(path, "rb") as f:
+            img_bytes = f.read()
+        
+        _clear_expired_ram_cache()
+        THUMBNAIL_RAM_CACHE[cache_key] = (img_bytes, "image/png", time.time())
+        
+        from fastapi import Response
+        return Response(content=img_bytes, media_type="image/png", headers={
+            "Cache-Control": "public, max-age=3600"
+        })
     except Exception as e:
+        print(f"Error serving history page: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -185,11 +185,18 @@ export default function LatestDownloads() {
             if (!res.ok) throw new Error('Failed to get download URL');
             const { url } = await res.json();
 
+            // Fetch the file to a blob to force download behavior
+            const fileRes = await fetch(url);
+            if (!fileRes.ok) throw new Error('Failed to fetch file content');
+            const blob = await fileRes.blob();
+            const blobUrl = window.URL.createObjectURL(blob);
+
             const a = document.createElement('a');
-            a.href = url;
+            a.href = blobUrl;
             a.download = `${record.name}.${record.format}`;
             document.body.appendChild(a);
             a.click();
+            window.URL.revokeObjectURL(blobUrl);
             document.body.removeChild(a);
         } catch (err) {
             console.error('Download error:', err);
