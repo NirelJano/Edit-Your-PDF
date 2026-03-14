@@ -60,10 +60,14 @@ async def lifespan(app: FastAPI):
     # Shutdown: Clean up task if needed
     task.cancel()
 
-app = FastAPI(title="OpenPDF Studio Backend", lifespan=lifespan)
+app = FastAPI(title="OpenPDF Studio Backend", version="1.0.0", lifespan=lifespan)
 
 # Configure CORS
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001").split(",")
+frontend_url = os.getenv("FRONTEND_URL")
+if frontend_url:
+    allowed_origins = [frontend_url, "http://localhost:3000", "http://localhost:3001"]
+else:
+    allowed_origins = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -73,6 +77,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/")
+async def root():
+    return "API is running"
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
 
 UPLOAD_DIR = "uploads"
 PROCESSED_DIR = "processed"
