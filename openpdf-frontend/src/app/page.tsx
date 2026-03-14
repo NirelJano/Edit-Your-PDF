@@ -65,23 +65,62 @@ export default function Home() {
       const duration = ((performance.now() - saveStartTime) / 1000).toFixed(2);
       console.log(`[Frontend] /api/save response received in ${duration}s, status: ${res.status}`);
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({ error: 'Unknown error' }));
-        console.error('[Frontend] Save failed on backend:', errData);
-        throw new Error(`Save failed: ${errData.error || res.statusText}`);
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.includes("application/json")) {
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(`Save failed: ${data.error || 'Unknown error'}`);
+        }
+        
+        if (data.jobId) {
+          console.log(`[Frontend] Save job started: ${data.jobId}. Polling...`);
+          let completed = false;
+          while (!completed) {
+            await new Promise(r => setTimeout(r, 2000));
+            const statusRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/save/status/${data.jobId}`);
+            
+            if (!statusRes.ok) {
+              const errData = await statusRes.json().catch(() => ({}));
+              throw new Error(`Save job failed: ${errData.error || statusRes.statusText}`);
+            }
+            
+            const statusData = await statusRes.json();
+            if (statusData.status === 'completed') {
+              completed = true;
+              console.log('[Frontend] Save job completed. Downloading...');
+              const fileRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/save/download/${data.jobId}`);
+              if (!fileRes.ok) throw new Error("Failed to download file");
+              
+              const pBlob = await fileRes.blob();
+              const pUrl = window.URL.createObjectURL(pBlob);
+              const pA = document.createElement('a');
+              pA.href = pUrl;
+              pA.download = `${filename}.${format}`;
+              document.body.appendChild(pA);
+              pA.click();
+              window.URL.revokeObjectURL(pUrl);
+              document.body.removeChild(pA);
+            } else if (statusData.status === 'failed') {
+              throw new Error(statusData.error || 'Server processing failed');
+            }
+          }
+        }
+      } else {
+        if (!res.ok) {
+          throw new Error(`Save failed with status ${res.status}`);
+        }
+        console.log('[Frontend] Starting blob download (direct fallback)...');
+        const blob = await res.blob();
+        console.log(`[Frontend] Blob received, size: ${(blob.size / 1024).toFixed(2)} KB`);
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${filename}.${format}`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
       }
-
-      console.log('[Frontend] Starting blob download...');
-      const blob = await res.blob();
-      console.log(`[Frontend] Blob received, size: ${(blob.size / 1024).toFixed(2)} KB`);
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${filename}.${format}`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
 
       setIsSaveModalOpen(false);
     } catch (err) {

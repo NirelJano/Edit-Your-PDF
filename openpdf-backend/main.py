@@ -205,22 +205,24 @@ async def get_page_image_endpoint(file_id: str, page_num: int):
     
     return FileResponse(path)
 
-@app.post("/api/save")
-async def save_document(req: SaveRequest, user = Depends(get_current_user)):
+# In-memory save jobs dictionary
+SAVE_JOBS = {}
+
+async def process_save_job(job_id: str, req: SaveRequest, user_id: str):
     import traceback
     import time
     save_start_time = time.time()
-    print(f"[Backend] Received save request for {req.filename} (format: {req.format}, pages: {len(req.pages)})")
+    print(f"[Backend] Starting background save job {job_id} for {req.filename} (format: {req.format}, pages: {len(req.pages)})")
     
     try:
         if not req.pages:
-            raise HTTPException(status_code=400, detail="No pages provided for the final document")
+            raise ValueError("No pages provided for the final document")
             
         output_name = req.filename if req.filename else "OpenPDF_Document"
         tmp_pdf_path = os.path.join(PROCESSED_DIR, f"{uuid.uuid4()}_temp.pdf")
         
         # Build the combined PDF optionally applying OCR - Offload to threadpool
-        print(f"[Backend] Building final PDF...")
+        print(f"[Backend] Building final PDF for job {job_id}...")
         build_start = time.time()
         await run_in_threadpool(
             build_final_pdf, 
@@ -232,7 +234,7 @@ async def save_document(req: SaveRequest, user = Depends(get_current_user)):
         print(f"[Backend] PDF building finished in {time.time() - build_start:.2f}s")
         
         if req.format.lower() == "docx":
-            output_docx = os.path.join(PROCESSED_DIR, f"{output_name}.docx")
+            output_docx = os.path.join(PROCESSED_DIR, f"{output_name}_{job_id}.docx")
             
             # Check page count before conversion for debugging
             try:
@@ -250,7 +252,7 @@ async def save_document(req: SaveRequest, user = Depends(get_current_user)):
             try:
                 # Store the original PDF as a preview version for the History page
                 preview_id = str(uuid.uuid4())
-                preview_storage_path = f"previews/{user.id}/{preview_id}.pdf"
+                preview_storage_path = f"previews/{user_id}/{preview_id}.pdf"
                 
                 # Upload the preview PDF - Offload
                 print(f"[Backend] Uploading preview and DOCX to Supabase...")
@@ -260,7 +262,7 @@ async def save_document(req: SaveRequest, user = Depends(get_current_user)):
                     
                     # Record in downloads table
                     unique_id = str(uuid.uuid4())
-                    storage_path = f"downloads/{user.id}/{unique_id}.docx"
+                    storage_path = f"downloads/{user_id}/{unique_id}.docx"
                     file_size = os.path.exists(output_docx) and os.path.getsize(output_docx) or 0
                     
                     # Upload the DOCX
@@ -274,7 +276,7 @@ async def save_document(req: SaveRequest, user = Depends(get_current_user)):
                 print(f"[Backend] Recording DOCX in database...")
                 def record_db():
                     data = {
-                        "user_id": user.id,
+                        "user_id": user_id,
                         "name": output_name,
                         "format": "docx",
                         "storage_path": storage_path,
@@ -289,31 +291,69 @@ async def save_document(req: SaveRequest, user = Depends(get_current_user)):
                 print(f"Failed to log DOCX download or preview: {e}")
                 traceback.print_exc()
 
-            print(f"[Backend] /api/save (DOCX) total time: {time.time() - save_start_time:.2f}s")
-            return FileResponse(
-                output_docx, 
-                filename=f"{output_name}.docx", 
-                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
+            print(f"[Backend] Save job {job_id} (DOCX) total time: {time.time() - save_start_time:.2f}s")
+            SAVE_JOBS[job_id] = {
+                "status": "completed",
+                "file_path": output_docx,
+                "filename": f"{output_name}.docx",
+                "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            }
         else:
-            output_pdf = os.path.join(PROCESSED_DIR, f"{output_name}.pdf")
+            output_pdf = os.path.join(PROCESSED_DIR, f"{output_name}_{job_id}.pdf")
             shutil.move(tmp_pdf_path, output_pdf)
             
             print(f"[Backend] Uploading PDF to Supabase...")
             try:
-                await run_in_threadpool(upload_and_log_download, user.id, output_pdf, output_name, "pdf")
+                await run_in_threadpool(upload_and_log_download, user_id, output_pdf, output_name, "pdf")
             except Exception as e:
                 print(f"Failed to log download: {e}")
 
-            print(f"[Backend] /api/save (PDF) total time: {time.time() - save_start_time:.2f}s")
-            return FileResponse(
-                output_pdf,
-                filename=f"{output_name}.pdf",
-                media_type="application/pdf"
-            )
+            print(f"[Backend] Save job {job_id} (PDF) total time: {time.time() - save_start_time:.2f}s")
+            SAVE_JOBS[job_id] = {
+                "status": "completed",
+                "file_path": output_pdf,
+                "filename": f"{output_name}.pdf",
+                "media_type": "application/pdf"
+            }
     except Exception as e:
-        print(f"[Backend] ERROR in /api/save: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": str(e), "traceback": traceback.format_exc()})
+        print(f"[Backend] ERROR in background save job {job_id}: {str(e)}")
+        SAVE_JOBS[job_id] = {
+            "status": "failed",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+@app.post("/api/save")
+async def save_document(req: SaveRequest, background_tasks: BackgroundTasks, user = Depends(get_current_user)):
+    job_id = str(uuid.uuid4())
+    SAVE_JOBS[job_id] = {"status": "processing"}
+    background_tasks.add_task(process_save_job, job_id, req, user.id)
+    return JSONResponse({"jobId": job_id})
+
+@app.get("/api/save/status/{job_id}")
+async def get_save_status(job_id: str):
+    job = SAVE_JOBS.get(job_id)
+    if not job:
+        return JSONResponse({"status": "failed", "error": "Job not found or expired"}, status_code=404)
+    
+    if job["status"] == "completed":
+        return JSONResponse({"status": "completed"})
+    elif job["status"] == "failed":
+        return JSONResponse({"status": "failed", "error": job.get("error")}, status_code=500)
+    else:
+        return JSONResponse({"status": "processing"})
+
+@app.get("/api/save/download/{job_id}")
+async def download_save_job(job_id: str):
+    job = SAVE_JOBS.get(job_id)
+    if not job or job["status"] != "completed":
+        raise HTTPException(status_code=404, detail="Job not ready or not found")
+        
+    return FileResponse(
+        job["file_path"], 
+        filename=job["filename"], 
+        media_type=job["media_type"]
+    )
 
 
 @app.post("/api/process-ocr")
