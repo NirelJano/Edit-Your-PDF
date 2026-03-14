@@ -131,18 +131,13 @@ def build_final_pdf(pages_spec: list, output_path: str, uploads_dir: str, proces
     import fitz
     import os
 
-    # Process all pages in parallel - Limit to 2 workers to avoid memory spikes
+    # Process all pages sequentially to avoid OOM on memory-constrained servers (like Render)
     temp_files = []
-    with ThreadPoolExecutor(max_workers=min(os.cpu_count() or 4, 2)) as executor:
-        futures = [
-            executor.submit(_process_page_for_final, spec, uploads_dir, processed_dir)
-            for spec in pages_spec
-        ]
-        total = len(futures)
-        for i, future in enumerate(futures):
-            temp_files.append(future.result())
-            if (i + 1) % 5 == 0 or i + 1 == total:
-                print(f"[Backend] Build Progress: {i + 1}/{total} pages processed")
+    total = len(pages_spec)
+    for i, spec in enumerate(pages_spec):
+        temp_files.append(_process_page_for_final(spec, uploads_dir, processed_dir))
+        if (i + 1) % 5 == 0 or i + 1 == total:
+            print(f"[Backend] Build Progress: {i + 1}/{total} pages processed")
 
     # Build the final document from ordered temp files
     print(f"[Backend] Merging {len(temp_files)} pages into final PDF...")

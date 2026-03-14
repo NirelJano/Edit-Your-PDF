@@ -131,9 +131,13 @@ export default function FileUploader({ onFilesAdded }: FileUploaderProps) {
         onDrop,
         accept: {
             'application/pdf': ['.pdf']
-        }
+        },
+        // Allows uploading the same file multiple times
+        multiple: true
     });
 
+    // Provide a unique key to the input element so it resets its value after drop
+    // this allows the same file to be selected again
     return (
         <div
             {...getRootProps()}
@@ -142,7 +146,7 @@ export default function FileUploader({ onFilesAdded }: FileUploaderProps) {
                 : 'border-[#444444] hover:border-[#666666] bg-[#1a1a1a]'
                 }`}
         >
-            <input {...getInputProps()} />
+            <input {...getInputProps()} key={Date.now()} />
             <UploadCloud className="w-12 h-12 mx-auto mb-4 text-zinc-400" />
             <h3 className="text-xl font-medium mb-2 text-white">
                 {isDragActive ? 'Drop PDFs here' : 'Drag & Drop PDFs'}

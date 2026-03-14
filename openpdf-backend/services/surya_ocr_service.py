@@ -247,23 +247,11 @@ def run_advanced_ocr(input_pdf_path: str, output_pdf_path: str, turbo: bool = Tr
         render_dpi = 200 # Reduced from 300/400 for speed and memory safety
         results = []
 
-        if num_pages == 1:
-            # Skip ProcessPool for single page to avoid overhead and nested pool issues
-            logger.info("  Processing single page sequentially...")
-            res = _process_single_page(0, input_pdf_path, render_dpi, turbo)
+        # Process sequentially to avoid OOM
+        logger.info("  Processing pages sequentially to prevent memory spikes...")
+        for i in range(num_pages):
+            res = _process_single_page(i, input_pdf_path, render_dpi, turbo)
             results.append(res)
-        else:
-            # Use a reasonable number of workers, capping at 2 on small servers to avoid OOM
-            max_workers = min(os.cpu_count() or 4, 2, num_pages)
-            logger.info(f"  Spawning ProcessPool with {max_workers} workers...")
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                # Map page indices to worker function
-                futures = [
-                    executor.submit(_process_single_page, i, input_pdf_path, render_dpi, turbo)
-                    for i in range(num_pages)
-                ]
-                for future in futures:
-                    results.append(future.result())
 
         # Sort results by page index to ensure order
         results.sort(key=lambda x: x["page_idx"])
